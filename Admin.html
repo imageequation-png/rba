@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CatalyseR – RBA Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600&family=Inter:wght@400;display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f3f7f5;--g1:#0b6b3a;--muted:#6b7280;--card:#fff}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);font-family:"Inter",sans-serif;color:#082017;padding:18px}
+.container{max-width:1100px;margin:0 auto}
+.header{text-align:center;margin-bottom:18px}
+.logo{height:32px;display:block;margin:0 auto}
+.title{font-family:"Poppins",sans-serif;color:var(--g1);font-weight:600;font-size:22px;margin-top:8px}
+.card{background:var(--card);padding:14px;border-radius:10px;box-shadow:0 10px 30px rgba(2,6,23,0.05);border:1px solid rgba(3,105,70,0.06)}
+.login{max-width:420px;margin:12px auto}
+.input,select{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef8;margin-bottom:8px}
+.btn{padding:8px 12px;border-radius:8px;border:none;background:var(--g1);color:#fff;font-weight:600;cursor:pointer}
+.filters{display:flex;gap:8px;align-items:center;margin:8px 0}
+.table{width:100%;border-collapse:collapse;margin-top:12px}
+.table th, .table td{padding:8px;border-bottom:1px solid #eef6ef;text-align:left}
+.row-actions button{margin-right:6px}
+.preview{padding:12px}
+.small{font-size:12px;color:#475056}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <img src="catalyser.jpg" class="logo" alt="logo"/>
+    <div class="title">CatalyseR – RBA Admin</div>
+  </div>
+
+  <div id="loginBox" class="card login">
+    <div><strong>Admin Login</strong></div>
+    <input id="adminPassInput" class="input" placeholder="Enter admin password" type="password" />
+    <div style="display:flex;gap:8px">
+      <button id="loginBtn" class="btn">Login</button>
+      <button id="setDefaultBtn" class="btn" style="background:#0b6b3a50">Set default password</button>
+    </div>
+    <div id="loginMsg" class="small"></div>
+  </div>
+
+  <div id="panel" style="display:none">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <strong>Responses</strong>
+          <div class="small">View saved student responses. Click "Report" to generate PDF.</div>
+        </div>
+        <div>
+          <select id="filterClass" class="input" style="width:160px">
+            <option value="">All classes</option>
+            <option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option>
+          </select>
+        </div>
+      </div>
+
+      <table class="table" id="respTable">
+        <thead><tr><th>When</th><th>Name</th><th>Class</th><th>School</th><th>Persona</th><th>Actions</th></tr></thead>
+        <tbody id="respBody"></tbody>
+      </table>
+    </div>
+
+    <div id="previewCard" class="card" style="margin-top:12px;display:none">
+      <div id="previewArea" class="preview"></div>
+      <div style="margin-top:8px">
+        <button id="downloadPdfBtn" class="btn">Download PDF</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<script>
+/* ---------------------------
+   Firebase config (same as student)
+   --------------------------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyAwHjxmW-blPOPksYRxulytL9yIHt2RHx0",
+  authDomain: "catalyser-rba.firebaseapp.com",
+  databaseURL: "https://catalyser-rba-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "catalyser-rba",
+  storageBucket: "catalyser-rba.firebasestorage.app",
+  messagingSenderId: "582692301116",
+  appId: "1:582692301116:web:5dbeddb1b086007be01639",
+};
+
+/* initialize */
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* simple admin flow:
+   - password is stored at /config/adminPassword
+   - default password: change_me_123!
+*/
+const DEFAULT_ADMIN_PASS = "change_me_123!";
+
+const loginBox = document.getElementById("loginBox");
+const adminPassInput = document.getElementById("adminPassInput");
+const loginBtn = document.getElementById("loginBtn");
+const setDefaultBtn = document.getElementById("setDefaultBtn");
+const loginMsg = document.getElementById("loginMsg");
+const panel = document.getElementById("panel");
+const respBody = document.getElementById("respBody");
+const filterClass = document.getElementById("filterClass");
+const previewCard = document.getElementById("previewCard");
+const previewArea = document.getElementById("previewArea");
+const downloadPdfBtn = document.getElementById("downloadPdfBtn");
+
+let loadedResponses = {}; // id -> data
+
+async function setDefaultPassword(){
+  await db.ref('config/adminPassword').set(DEFAULT_ADMIN_PASS);
+  loginMsg.textContent = "Default password set. Please change it after login.";
+}
+
+/* verify password against DB */
+async function verifyPassword(pw){
+  const snap = await db.ref('config/adminPassword').once('value');
+  const stored = snap.val();
+  // if no stored password, create default and require it
+  if (!stored) {
+    await db.ref('config/adminPassword').set(DEFAULT_ADMIN_PASS);
+    return DEFAULT_ADMIN_PASS === pw;
+  }
+  return stored === pw;
+}
+
+/* login click */
+loginBtn.addEventListener('click', async ()=>{
+  const pw = adminPassInput.value.trim();
+  if (!pw) { loginMsg.textContent = "Enter password"; return; }
+  loginMsg.textContent = "Checking...";
+  try {
+    const ok = await verifyPassword(pw);
+    if (!ok) { loginMsg.textContent = "Invalid password"; return; }
+    loginMsg.textContent = "Login successful";
+    loginBox.style.display = "none";
+    panel.style.display = "block";
+    loadResponses();
+  } catch (err) {
+    console.error(err);
+    loginMsg.textContent = "Error checking password";
+  }
+});
+
+setDefaultBtn.addEventListener('click', async ()=> {
+  await setDefaultPassword();
+  loginMsg.textContent = "Default password written to DB.";
+});
+
+/* load responses list */
+async function loadResponses(){
+  const snap = await db.ref('responses').orderByChild('timestamp').once('value');
+  const data = snap.val() || {};
+  // convert to array with reversed timestamp order
+  loadedResponses = {};
+  const rows = [];
+  Object.keys(data).forEach(k => {
+    const item = data[k];
+    item._id = k;
+    loadedResponses[k] = item;
+    rows.push(item);
+  });
+  rows.sort((a,b) => (a.timestamp > b.timestamp ? -1 : 1));
+  renderTable(rows);
+}
+
+/* render table with optional filter */
+function renderTable(rows){
+  const cls = filterClass.value;
+  respBody.innerHTML = "";
+  rows.forEach(item=>{
+    if (cls && String(item.class) !== String(cls)) return;
+    const tr = document.createElement('tr');
+    const when = new Date(item.timestamp).toLocaleString();
+    tr.innerHTML = `<td>${when}</td>
+      <td>${item.name}</td>
+      <td>${item.class}</td>
+      <td>${item.school}</td>
+      <td>${item.persona || ''}</td>
+      <td class="row-actions">
+        <button class="btn" data-id="${item._id}" onclick="openReport('${item._id}')">Report</button>
+      </td>`;
+    respBody.appendChild(tr);
+  });
+}
+
+/* filtering */
+filterClass.addEventListener('change', ()=> {
+  loadResponses(); // reload and render with filter
+});
+
+/* open report (generate preview HTML then enable PDF download) */
+window.openReport = function(id){
+  const item = loadedResponses[id];
+  if (!item) return alert("Not found");
+  previewCard.style.display = "block";
+  // professional layout HTML (simple clean)
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:800px;padding:18px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <img src="catalyser.jpg" style="height:42px"/>
+        <div>
+          <div style="font-size:18px;font-weight:700;color:#0b6b3a">CatalyseR</div>
+          <div style="font-size:13px;color:#556B60">Raw Brain Analysis — Confidential Report</div>
+        </div>
+      </div>
+      <hr style="margin:12px 0;border:none;border-top:1px solid #eee"/>
+      <div style="display:flex;justify-content:space-between;gap:12px">
+        <div>
+          <div style="font-weight:700">${item.name}</div>
+          <div class="small">Class: ${item.class} | School: ${item.school}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:12px;color:#666">${new Date(item.timestamp).toLocaleString()}</div>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <div style="font-weight:700;margin-bottom:6px">Analysis Summary</div>
+        <ol>
+          ${ (item.analysisPoints || []).map(p => `<li style="margin-bottom:6px">${p}</li>`).join('') }
+        </ol>
+      </div>
+      <div style="margin-top:10px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+        <div style="background:#f7fff7;padding:8px;border-radius:8px">
+          <div style="font-size:12px;color:#666">Emotional</div>
+          <div style="font-weight:700;font-size:18px">${ item.scores && item.scores.emotional ? item.scores.emotional : '-' }</div>
+        </div>
+        <div style="background:#f7fff7;padding:8px;border-radius:8px">
+          <div style="font-size:12px;color:#666">Discipline</div>
+          <div style="font-weight:700;font-size:18px">${ item.scores && item.scores.discipline ? item.scores.discipline : '-' }</div>
+        </div>
+        <div style="background:#f7fff7;padding:8px;border-radius:8px">
+          <div style="font-size:12px;color:#666">Curiosity</div>
+          <div style="font-weight:700;font-size:18px">${ item.scores && item.scores.curiosity ? item.scores.curiosity : '-' }</div>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div style="font-weight:700">Persona</div>
+        <div>${ item.persona || '' }</div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div style="font-weight:700">Full Answers</div>
+        <div style="font-size:13px;margin-top:6px">
+          ${ (item.answers || []).map((a,i)=>`<div style="margin-bottom:6px"><strong>Q${i+1}:</strong> ${a===null||a===undefined ? '<em>Not answered</em>' : a}</div>`).join('') }
+        </div>
+      </div>
+
+      <div style="margin-top:18px;font-size:12px;color:#666">
+        Confidential — for counsellor review only.
+      </div>
+    </div>
+  `;
+  previewArea.innerHTML = html;
+  downloadPdfBtn.onclick = ()=> generatePdfFromElement(previewArea, `${item.name.replace(/\s+/g,'_')}_RBA.pdf`);
+};
+
+/* pdf generation util */
+async function generatePdfFromElement(el, filename){
+  const canvas = await html2canvas(el, {scale:2});
+  const imgData = canvas.toDataURL('image/png');
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF('p','pt','a4');
+  const width = pdf.internal.pageSize.getWidth();
+  const height = canvas.height * width / canvas.width;
+  pdf.addImage(imgData,'PNG',0,0,width,height);
+  pdf.save(filename);
+}
+
+/* on load: ensure config exists (set default if missing) */
+(async function init(){
+  // ensure default password if none
+  const snap = await db.ref('config/adminPassword').once('value');
+  if (!snap.exists()) {
+    await db.ref('config/adminPassword').set(DEFAULT_ADMIN_PASS);
+  }
+})();
+</script>
+</body>
+</html>
